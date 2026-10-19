@@ -20,7 +20,7 @@ $revision = (git -C $source rev-parse HEAD).Trim()
 if ($revision -ne "a0eca0d2bf10326506fb762f0eec14255b27bef5") { throw "Unexpected libiio v0.26 revision: $revision" }
 cmake -S $source -B $build -G Ninja "-DCMAKE_BUILD_TYPE=Release" `
     "-DCMAKE_INSTALL_PREFIX=$install" "-DCMAKE_PREFIX_PATH=$Mingw" `
-    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DWITH_TESTS=OFF -DWITH_EXAMPLES=OFF `
+    "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" -DWITH_TESTS=OFF -DWITH_EXAMPLES=OFF `
     -DWITH_IIOD=OFF -DWITH_USB_BACKEND=ON -DWITH_NETWORK_BACKEND=ON -DWITH_ZSTD=ON
 if ($LASTEXITCODE -ne 0) { throw "libiio configure failed" }
 cmake --build $build
