@@ -123,7 +123,7 @@ else()
 endif()
 
 # ---- Airspy (optional native source) --------------------------------------
-find_path(AIRSPY_INCLUDE_DIR NAMES airspy.h)
+find_path(AIRSPY_INCLUDE_DIR NAMES airspy.h PATH_SUFFIXES libairspy)
 find_library(AIRSPY_LIBRARY NAMES airspy libairspy)
 set(AIRSPY_FOUND FALSE)
 if(AIRSPY_INCLUDE_DIR AND AIRSPY_LIBRARY)
@@ -142,6 +142,28 @@ if(RTLSDR_INCLUDE_DIR AND RTLSDR_LIBRARY)
   message(STATUS "RTL-SDR library found: ${RTLSDR_LIBRARY}")
 else()
   message(STATUS "RTL-SDR library not found - RTL-SDR source disabled")
+endif()
+
+# ---- Native libiio (0.x API, optional) -------------------------------------
+option(IRIDISCOPE_REQUIRE_IIO "Fail configure if native AD936x support is unavailable" OFF)
+find_path(LIBIIO_INCLUDE_DIR NAMES iio.h)
+find_library(LIBIIO_LIBRARY NAMES iio libiio)
+set(LIBIIO_FOUND FALSE)
+if(LIBIIO_INCLUDE_DIR AND LIBIIO_LIBRARY)
+  include(CheckCXXSourceCompiles)
+  set(CMAKE_REQUIRED_INCLUDES ${LIBIIO_INCLUDE_DIR})
+  set(CMAKE_REQUIRED_LIBRARIES ${LIBIIO_LIBRARY})
+  check_cxx_source_compiles("#include <iio.h>
+int main() { auto *c = iio_create_context_from_uri(\"ip:127.0.0.1\"); iio_context_destroy(c); return 0; }" LIBIIO_HAS_LEGACY_API)
+  unset(CMAKE_REQUIRED_INCLUDES)
+  unset(CMAKE_REQUIRED_LIBRARIES)
+  if(LIBIIO_HAS_LEGACY_API)
+    set(LIBIIO_FOUND TRUE)
+    message(STATUS "Native libiio AD936x RX enabled: ${LIBIIO_LIBRARY}")
+  endif()
+endif()
+if(IRIDISCOPE_REQUIRE_IIO AND NOT LIBIIO_FOUND)
+  message(FATAL_ERROR "Native IIO support requires libiio 0.x (recommended v0.26)")
 endif()
 
 # ---- libacars-2 (optional ACARS / ARINC-622 decoder) ----------------------
@@ -299,6 +321,13 @@ if(RTLSDR_FOUND)
   target_link_libraries(IridiScope PRIVATE ${RTLSDR_LIBRARY})
 endif()
 
+if(LIBIIO_FOUND)
+  target_sources(IridiScope PRIVATE src/sdr/iio_source.cpp)
+  target_compile_definitions(IridiScope PRIVATE HAS_LIBIIO=1)
+  target_include_directories(IridiScope PRIVATE ${LIBIIO_INCLUDE_DIR})
+  target_link_libraries(IridiScope PRIVATE ${LIBIIO_LIBRARY})
+endif()
+
 # libacars-2: optional ARINC-622 / ADS-C / CPDLC decoding.
 target_sources(IridiScope PRIVATE src/acars/libacars_bridge.cpp)
 if(LIBACARS_FOUND)
@@ -329,6 +358,9 @@ if(MINGW)
   if(RTLSDR_FOUND)
     list(APPEND MINGW_RUNTIME_DLLS librtlsdr.dll libusb-1.0.dll)
   endif()
+  if(LIBIIO_FOUND)
+    list(APPEND MINGW_RUNTIME_DLLS libiio.dll libusb-1.0.dll libxml2-16.dll libxml2-2.dll libiconv-2.dll zlib1.dll liblzma-5.dll libzstd.dll)
+  endif()
   if(LIBACARS_FOUND)
     list(APPEND MINGW_RUNTIME_DLLS
       libacars-2.dll libjansson-4.dll libxml2-16.dll zlib1.dll
@@ -343,6 +375,19 @@ if(MINGW)
         COMMENT "Copying ${dll}")
     endif()
   endforeach()
+endif()
+
+# Custom libiio prefixes (scripts/build_iio.ps1) are outside MINGW_BIN_DIR.
+if(LIBIIO_FOUND AND WIN32)
+  get_filename_component(LIBIIO_LIB_DIR "${LIBIIO_LIBRARY}" DIRECTORY)
+  find_file(LIBIIO_RUNTIME NAMES libiio.dll
+    HINTS "${LIBIIO_LIB_DIR}/../bin" "${LIBIIO_LIB_DIR}")
+  if(LIBIIO_RUNTIME)
+    add_custom_command(TARGET IridiScope POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${LIBIIO_RUNTIME}" "$<TARGET_FILE_DIR:IridiScope>"
+      COMMENT "Copying native libiio runtime")
+  endif()
 endif()
 
 # Copy sdrplay_api.dll next to the executable so SDRplay devices work without

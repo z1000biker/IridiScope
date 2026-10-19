@@ -4,7 +4,9 @@
 #   powershell ... -File scripts\build.ps1 -Clean
 param(
     [string]$BuildType = "RelWithDebInfo",
-    [switch]$Clean
+    [switch]$Clean,
+    [switch]$RequireIio,
+    [string]$IioRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +26,8 @@ if ($Clean) {
 
 $cmakeArgs = @("-S", $root, "-B", $build, "-G", "Ninja",
                "-DCMAKE_BUILD_TYPE=$BuildType")
+if ($RequireIio) { $cmakeArgs += "-DIRIDISCOPE_REQUIRE_IIO=ON" }
+if ($IioRoot) { $cmakeArgs += "-DCMAKE_PREFIX_PATH=$IioRoot" }
 Write-Host "cmake $($cmakeArgs -join ' ')"
 & cmake @cmakeArgs
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }

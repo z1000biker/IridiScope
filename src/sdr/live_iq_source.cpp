@@ -1,12 +1,16 @@
 #include "sdr/live_iq_source.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace iridi {
 
 #ifndef HAS_SDRPLAY
 // SDRplay support not built in: the backend factory is a no-op.
 std::unique_ptr<SdrSource> make_sdrplay_source() { return nullptr; }
+#endif
+#ifndef HAS_LIBIIO
+std::unique_ptr<SdrSource> make_iio_source() { return nullptr; }
 #endif
 #ifndef HAS_HACKRF
 // HackRF support not built in: the backend factory is a no-op.
@@ -26,6 +30,7 @@ std::unique_ptr<SdrSource> make_sdr_source(SdrKind kind) {
     case SdrKind::HackRF: return make_hackrf_source();
     case SdrKind::Airspy: return make_airspy_source();
     case SdrKind::RTL:    return make_rtlsdr_source();
+    case SdrKind::IIO:    return make_iio_source();
     case SdrKind::Sdrplay:
     default:              return make_sdrplay_source();
     }
@@ -49,7 +54,7 @@ bool LiveIqSource::open(int device_index, double center_hz, double sample_rate_h
     err.clear();
 
     if (!ensure_backend()) {
-        err = "SDRplay support is not compiled in (API not found at build time)";
+        err = "Selected SDR backend is not compiled in (library not found at build time)";
         return false;
     }
 
@@ -81,9 +86,11 @@ bool LiveIqSource::open(int device_index, double center_hz, double sample_rate_h
     if (!sdr_->start(device_index, [this](const float *iq, int n) { on_samples(iq, n); }, e)) {
         open_.store(false);
         cv_.notify_all();
-        err = e.empty() ? "failed to start SDRplay device" : e;
+        err = e.empty() ? "failed to start selected SDR device" : e;
         return false;
     }
+    sample_rate_ = sdr_->sampleRate();
+    center_hz_ = sdr_->centerFreq();
     return true;
 }
 
@@ -100,12 +107,12 @@ void LiveIqSource::wake() {
 
 void LiveIqSource::set_center_frequency(double hz) {
     center_hz_ = hz;
-    if (sdr_) sdr_->setCenterFreq(hz);
+    if (sdr_) { sdr_->setCenterFreq(hz); center_hz_ = sdr_->centerFreq(); }
 }
 
 void LiveIqSource::set_sample_rate(double hz) {
     sample_rate_ = hz;
-    if (sdr_) sdr_->setSampleRate(hz);
+    if (sdr_) { sdr_->setSampleRate(hz); sample_rate_ = sdr_->sampleRate(); }
 }
 
 void LiveIqSource::clear_buffer() {
@@ -176,6 +183,19 @@ void LiveIqSource::set_mixer_agc(bool on) {
 
 bool LiveIqSource::running() const { return sdr_ && sdr_->running(); }
 
+void LiveIqSource::set_uri(const std::string &uri) {
+    if (ensure_backend()) sdr_->setUri(uri);
+}
+void LiveIqSource::set_bandwidth(double hz) {
+    if (ensure_backend()) sdr_->setBandwidth(hz);
+}
+void LiveIqSource::set_rf_port(const std::string &port) {
+    if (ensure_backend()) sdr_->setRfPort(port);
+}
+std::string LiveIqSource::last_error() const {
+    return sdr_ ? sdr_->lastError() : std::string{};
+}
+
 std::vector<SdrDeviceInfo> LiveIqSource::list_devices() const {
     if (!ensure_backend()) return {};
     return sdr_->listDevices();
@@ -222,7 +242,12 @@ void LiveIqSource::on_samples(const float *iq, int n) {
 size_t LiveIqSource::read_cf32(float *out, size_t max_samples) {
     if (max_samples == 0) return 0;
     std::unique_lock<std::mutex> lk(mtx_);
-    cv_.wait(lk, [this] { return count_ > 0 || !open_.load(); });
+    // Poll backend health so a disconnected synchronous receiver cannot leave
+    // the engine blocked forever waiting for a callback that will never arrive.
+    while (count_ == 0 && open_.load()) {
+        if (sdr_ && !sdr_->running()) { open_.store(false); break; }
+        cv_.wait_for(lk, std::chrono::milliseconds(100));
+    }
     if (count_ == 0) return 0;
 
     size_t k = std::min(max_samples, count_);

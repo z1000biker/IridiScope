@@ -20,7 +20,7 @@ struct SdrDeviceInfo {
 };
 
 // Which SDR backend a LiveIqSource should use.
-enum class SdrKind { Sdrplay, HackRF, Airspy, RTL };
+enum class SdrKind { Sdrplay, HackRF, Airspy, RTL, IIO };
 
 // Called from the SDR read thread with interleaved float IQ, already converted
 // to [-1, 1].
@@ -49,6 +49,11 @@ public:
     virtual void setLinearGain(int) {}// Airspy linearity knob (0-21)
     virtual void setLnaAgc(bool) {}
     virtual void setMixerAgc(bool) {}
+    // Native libiio connection and AD936x RX controls (set before start).
+    virtual void setUri(const std::string &) {}
+    virtual void setBandwidth(double) {}
+    virtual void setRfPort(const std::string &) {}
+    virtual std::string lastError() const { return {}; }
 
     virtual double centerFreq() const = 0;
     virtual double sampleRate() const = 0;
@@ -66,6 +71,7 @@ std::unique_ptr<SdrSource> make_sdrplay_source();
 std::unique_ptr<SdrSource> make_hackrf_source();
 std::unique_ptr<SdrSource> make_airspy_source();
 std::unique_ptr<SdrSource> make_rtlsdr_source();
+std::unique_ptr<SdrSource> make_iio_source();
 
 // Dispatches to the backend factory for the given kind.
 std::unique_ptr<SdrSource> make_sdr_source(SdrKind kind);

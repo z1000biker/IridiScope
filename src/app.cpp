@@ -72,6 +72,7 @@ iridi::LiveIqSource g_sdr(iridi::SdrKind::Sdrplay);
 iridi::LiveIqSource g_hackrf(iridi::SdrKind::HackRF);
 iridi::LiveIqSource g_airspy(iridi::SdrKind::Airspy);
 iridi::LiveIqSource g_rtlsdr(iridi::SdrKind::RTL);
+iridi::LiveIqSource g_iio(iridi::SdrKind::IIO);
 iridi::Engine g_engine;
 Waterfall g_waterfall;
 iridi::AudioPlayer g_audio;
@@ -96,13 +97,14 @@ bool g_autoplay = false;
 int g_autoplay_last_id = -1;
 std::deque<int> g_autoplay_queue;
 
-// Active input: 0 = IQ file, 1 = SDRplay, 2 = HackRF, 3 = Airspy, 4 = RTL-SDR.
+// Active input: 0 = IQ file, 1 = SDRplay, 2 = HackRF, 3 = Airspy, 4 = RTL-SDR, 5 = native IIO AD936x.
 int g_source_kind = 0;
 iridi::IqSource *active_source() {
     if (g_source_kind == 1) return (iridi::IqSource *)&g_sdr;
     if (g_source_kind == 2) return (iridi::IqSource *)&g_hackrf;
     if (g_source_kind == 3) return (iridi::IqSource *)&g_airspy;
     if (g_source_kind == 4) return (iridi::IqSource *)&g_rtlsdr;
+    if (g_source_kind == 5) return &g_iio;
     return (iridi::IqSource *)&g_file;
 }
 
@@ -177,6 +179,20 @@ std::mutex g_rtl_dev_mtx;
 std::atomic<bool> g_rtl_scanning{false};
 bool g_rtl_scan_requested = false;
 std::thread g_rtl_scan_thread;
+
+// AD936x uses RX1. Empty URI scans USB/network contexts; explicit IP also
+// works when mDNS discovery is unavailable (e.g. ip:192.168.2.1).
+char g_iio_uri[256] = "ip:192.168.2.1";
+char g_iio_port[64] = "A_BALANCED";
+const double kIioRates[] = {2.5e6, 4e6, 6e6, 8e6, 10e6, 12e6, 20e6};
+const char *kIioRateLabels[] = {"2.5", "4", "6", "8", "10", "12", "20"};
+int g_iio_rate_idx = 0, g_iio_device_idx = 0;
+float g_iio_bandwidth = 0, g_iio_gain = 40, g_iio_ppm = 0;
+bool g_iio_agc = true;
+std::vector<iridi::SdrDeviceInfo> g_iio_devices;
+std::mutex g_iio_dev_mtx;
+std::atomic<bool> g_iio_scanning{false};
+std::thread g_iio_scan_thread;
 
 std::vector<std::string> g_log;
 bool g_show_map = true;
@@ -527,6 +543,11 @@ void retune_vfo(double hz) {
     else if (g_source_kind == 2) { g_hackrf.set_center_frequency(hz); g_hackrf.clear_buffer(); }
     else if (g_source_kind == 3) { g_airspy.set_center_frequency(hz); g_airspy.clear_buffer(); }
     else if (g_source_kind == 4) { g_rtlsdr.set_center_frequency(hz); g_rtlsdr.clear_buffer(); }
+    else if (g_source_kind == 5) {
+        g_iio.set_center_frequency(hz); g_iio.clear_buffer();
+        hz = g_vfo_hz = g_iio.center_frequency();
+        if (!g_iio.last_error().empty()) add_log("IIO: %s", g_iio.last_error().c_str());
+    }
     g_engine.set_center_frequency(hz);
     g_waterfall.clear();
     g_spec_seq = 0;
@@ -638,7 +659,7 @@ void open_iq_file(const std::string &path) {
     g_sdr.close();
     g_hackrf.close();
     g_airspy.close();
-    g_rtlsdr.close();
+    g_rtlsdr.close(); g_iio.close();
     g_source_kind = 0;
     std::string err;
     if (!g_file.open(path, err)) { add_log("ERROR: %s", err.c_str()); return; }
@@ -661,7 +682,7 @@ void start_sdr() {
     g_file.close();
     g_hackrf.close();
     g_airspy.close();
-    g_rtlsdr.close();
+    g_rtlsdr.close(); g_iio.close();
     g_source_kind = 1;
     g_sdr.set_gain(g_sdr_agc ? -1.0 : (double)g_sdr_gr);
     g_sdr.set_bias_tee(g_sdr_bias);
@@ -684,7 +705,7 @@ void start_hackrf() {
     g_file.close();
     g_sdr.close();
     g_airspy.close();
-    g_rtlsdr.close();
+    g_rtlsdr.close(); g_iio.close();
     g_source_kind = 2;
     g_hackrf.set_lna_gain(g_hrf_lna);
     g_hackrf.set_vga_gain(g_hrf_vga);
@@ -710,7 +731,7 @@ void start_airspy() {
     g_file.close();
     g_sdr.close();
     g_hackrf.close();
-    g_rtlsdr.close();
+    g_rtlsdr.close(); g_iio.close();
     g_source_kind = 3;
     g_airspy.set_gain_mode(g_ap_gain_mode);
     g_airspy.set_sense_gain(g_ap_sense);
@@ -737,6 +758,7 @@ void start_airspy() {
 
 void start_rtl() {
     g_engine.stop();
+    g_iio.close();
     g_file.close();
     g_sdr.close();
     g_hackrf.close();
@@ -765,7 +787,7 @@ void draw_menu_bar() {
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("Open IQ file...", "Ctrl+O")) g_request_open = true;
-            if (ImGui::MenuItem("Close")) { g_engine.stop(); g_file.close(); g_sdr.close(); g_hackrf.close(); g_airspy.close(); g_rtlsdr.close(); g_waterfall.clear(); add_log("Closed source"); }
+            if (ImGui::MenuItem("Close")) { g_engine.stop(); g_file.close(); g_sdr.close(); g_hackrf.close(); g_airspy.close(); g_rtlsdr.close(); g_iio.close(); g_waterfall.clear(); add_log("Closed source"); }
             ImGui::Separator();
             if (ImGui::MenuItem("Quit", "Alt+F4")) glfwSetWindowShouldClose(g_window, 1);
             ImGui::EndMenu();
@@ -2187,7 +2209,7 @@ void draw_rtlsdr_source_controls() {
     } else {
         if (ImGui::Button("Stop RTL-SDR")) {
             g_engine.stop();
-            g_rtlsdr.close();
+            g_rtlsdr.close(); g_iio.close();
             add_log("RTL-SDR stopped");
         }
         ImGui::SameLine();
@@ -2199,20 +2221,87 @@ void draw_rtlsdr_source_controls() {
 #endif
 }
 
+void start_iio() {
+    g_engine.stop();
+    g_file.close(); g_sdr.close(); g_hackrf.close(); g_airspy.close(); g_rtlsdr.close();
+    g_iio.close();
+    g_source_kind = 5;
+    g_iio.set_uri(g_iio_uri);
+    g_iio.set_rf_port(g_iio_port);
+    g_iio.set_bandwidth(g_iio_bandwidth * 1e6);
+    g_iio.set_gain(g_iio_agc ? -1 : g_iio_gain);
+    g_iio.set_ppm(g_iio_ppm);
+    std::string err;
+    if (!g_iio.open(g_iio_device_idx, g_vfo_hz, kIioRates[g_iio_rate_idx], err)) {
+        add_log("ERROR: %s", err.c_str()); return;
+    }
+    g_vfo_hz = g_iio.center_frequency();
+    add_log("Native IIO RX started: %.6f MHz, %.3f Msps", g_vfo_hz / 1e6, g_iio.sample_rate() / 1e6);
+    g_waterfall.clear(); g_spec_seq = 0; g_freq_mhz.clear(); g_view_reset = true;
+    start_engine();
+}
+
+void draw_iio_source_controls() {
+    const bool scanning = g_iio_scanning.load();
+    const bool opened = g_iio.is_open();
+    ImGui::TextWrapped("Zynq7010/7020 + AD936x, PlutoSDR and compatible IIO firmware (RX only)");
+    ImGui::BeginDisabled(opened || scanning);
+    ImGui::InputText("IIO URI", g_iio_uri, sizeof(g_iio_uri));
+    ImGui::TextDisabled("ip:192.168.2.1 / usb:... / empty = discover");
+    if (ImGui::Button("Discover / Refresh")) {
+        g_iio.set_uri(g_iio_uri);
+        request_scan(g_iio, g_iio_devices, g_iio_dev_mtx, g_iio_scanning, g_iio_scan_thread);
+    }
+    std::vector<iridi::SdrDeviceInfo> devs;
+    { std::lock_guard<std::mutex> lock(g_iio_dev_mtx); devs = g_iio_devices; }
+    if (!devs.empty()) {
+        std::vector<std::string> labels;
+        std::vector<const char *> names;
+        for (const auto &d : devs) labels.push_back(d.name + " [" + d.serial + "]");
+        for (const auto &label : labels) names.push_back(label.c_str());
+        g_iio_device_idx = std::clamp(g_iio_device_idx, 0, (int)names.size() - 1);
+        ImGui::Combo("IIO device", &g_iio_device_idx, names.data(), (int)names.size());
+    }
+    ImGui::Combo("Sample rate (Msps)", &g_iio_rate_idx, kIioRateLabels, 7);
+    ImGui::InputFloat("RF bandwidth (MHz; 0=auto)", &g_iio_bandwidth);
+    g_iio_bandwidth = std::clamp(g_iio_bandwidth, 0.0f, 56.0f);
+    ImGui::InputText("RX RF port", g_iio_port, sizeof(g_iio_port));
+    ImGui::EndDisabled();
+    if (scanning) ImGui::TextDisabled("Discovering compatible IIO receivers...");
+    if (ImGui::Checkbox("RX AGC (slow attack)", &g_iio_agc))
+        g_iio.set_gain(g_iio_agc ? -1 : g_iio_gain);
+    ImGui::BeginDisabled(g_iio_agc);
+    if (ImGui::SliderFloat("RX gain (dB)", &g_iio_gain, 0, 73)) g_iio.set_gain(g_iio_gain);
+    ImGui::EndDisabled();
+    if (ImGui::InputFloat("LO correction (ppm)", &g_iio_ppm)) g_iio.set_ppm(g_iio_ppm);
+    ImGui::TextDisabled("Bias tee: use an external supply if your LNA requires one.");
+#ifndef HAS_LIBIIO
+    ImGui::TextWrapped("Native IIO support not compiled in; install libiio 0.x and rebuild.");
+#endif
+    if (!g_iio.last_error().empty()) ImGui::TextWrapped("%s", g_iio.last_error().c_str());
+    ImGui::BeginDisabled(scanning || !g_iio.available());
+    if (!opened) {
+        if (ImGui::Button("Start IIO RX")) start_iio();
+    } else {
+        if (ImGui::Button("Stop IIO RX")) { g_engine.stop(); g_iio.close(); }
+    }
+    ImGui::EndDisabled();
+}
+
 void draw_source_window() {
     if (!g_show_source) return;
     ImGui::SetNextWindowSize(ImVec2(460, 680), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Control###Source", &g_show_source)) {
         if (ImGui::CollapsingHeader("Input", ImGuiTreeNodeFlags_DefaultOpen)) {
-        const char *kinds[] = {"IQ file", "SDRplay", "HackRF", "Airspy", "RTL-SDR"};
+        const char *kinds[] = {"IQ file", "SDRplay", "HackRF", "Airspy", "RTL-SDR", "Zynq / Pluto / IIO"};
         ImGui::SetNextItemWidth(160);
-        if (ImGui::Combo("Type", &g_source_kind, kinds, 5)) {
+        if (ImGui::Combo("Type", &g_source_kind, kinds, 6)) {
             g_engine.stop();
             g_file.close();
             g_sdr.close();
             g_hackrf.close();
             g_airspy.close();
-            g_rtlsdr.close();
+            g_rtlsdr.close(); g_iio.close();
             g_freq_mhz.clear();
             g_view_reset = true;
             if (g_source_kind == 1) g_sdr_scan_requested = false; // allow a fresh scan
@@ -2254,8 +2343,10 @@ void draw_source_window() {
             draw_hackrf_source_controls();
         } else if (g_source_kind == 3) {
             draw_airspy_source_controls();
-        } else {
+        } else if (g_source_kind == 4) {
             draw_rtlsdr_source_controls();
+        } else {
+            draw_iio_source_controls();
         }
         if (g_source_kind != 0) {
             ImGui::Separator();
@@ -2699,11 +2790,23 @@ static int sms_decode_hex(const char *hex) {
     return 0;
 }
 
-static int scan_live(iridi::SdrKind kind, double seconds, double rate_hz) {
+static int iio_list_devices(const char *uri) {
+    iridi::LiveIqSource sdr(iridi::SdrKind::IIO);
+    if (!sdr.available()) { fprintf(stderr, "Native libiio support not compiled in\n"); return 2; }
+    sdr.set_uri(uri);
+    auto devs = sdr.list_devices();
+    printf("iio_devices=%zu\n", devs.size());
+    for (const auto &dev : devs) printf("%d: %s [%s]\n", dev.index, dev.name.c_str(), dev.serial.c_str());
+    return devs.empty() ? 1 : 0;
+}
+
+static int scan_live(iridi::SdrKind kind, double seconds, double rate_hz, const char *uri = "") {
     iridi::LiveIqSource sdr(kind);
+    sdr.set_uri(uri);
     const char *label = (kind == iridi::SdrKind::HackRF) ? "HackRF"
                       : (kind == iridi::SdrKind::Airspy) ? "Airspy"
-                      : (kind == iridi::SdrKind::RTL) ? "RTL-SDR" : "SDRplay";
+                      : (kind == iridi::SdrKind::RTL) ? "RTL-SDR"
+                      : (kind == iridi::SdrKind::IIO) ? "Native IIO" : "SDRplay";
     if (!sdr.available()) { fprintf(stderr, "%s support not compiled in\n", label); return 2; }
     std::string err;
     if (!sdr.open(0, kDefaultVfoHz, rate_hz, err)) {
@@ -2713,7 +2816,7 @@ static int scan_live(iridi::SdrKind kind, double seconds, double rate_hz) {
     iridi::Engine eng;
     if (!eng.start(&sdr)) { fprintf(stderr, "engine start failed\n"); sdr.close(); return 4; }
     auto t0 = std::chrono::steady_clock::now();
-    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < seconds) {
+    while (sdr.running() && std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < seconds) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     auto s = eng.stats();
@@ -2765,8 +2868,10 @@ static int scan_live(iridi::SdrKind kind, double seconds, double rate_hz) {
         for (const auto &m : eng.acars().messages()) if (m.has_arinc622) arinc++;
         printf("arinc622_messages=%zu\n", arinc);
     }
+    const auto error = sdr.last_error();
     eng.stop();
     sdr.close();
+    if (!error.empty()) { fprintf(stderr, "%s\n", error.c_str()); return 5; }
     return 0;
 }
 
@@ -2817,7 +2922,7 @@ int main(int argc, char **argv) {
         if (a1 == "--info" || a1 == "--parse" || a1 == "--frame" || a1 == "--scan" ||
             a1 == "--sdr-list" || a1 == "--sdr-scan" || a1 == "--hrf-list" || a1 == "--hrf-scan" ||
             a1 == "--ap-list" || a1 == "--ap-scan" || a1 == "--rtl-list" || a1 == "--rtl-scan" ||
-            a1 == "--check-update" || a1 == "--lookup" || a1 == "--sms" || a1 == "--raw")
+            a1 == "--iio-list" || a1 == "--iio-scan" || a1 == "--check-update" || a1 == "--lookup" || a1 == "--sms" || a1 == "--raw")
             attach_console();
     }
     if (argc >= 2 && std::string(argv[1]) == "--check-update") return check_update();
@@ -2829,6 +2934,10 @@ int main(int argc, char **argv) {
     if (argc >= 2 && std::string(argv[1]) == "--sdr-list") return sdr_list_devices();
     if (argc >= 2 && std::string(argv[1]) == "--hrf-list") return hrf_list_devices();
     if (argc >= 2 && std::string(argv[1]) == "--ap-list") return ap_list_devices();
+    if (argc >= 2 && std::string(argv[1]) == "--iio-list") return iio_list_devices(argc >= 3 ? argv[2] : "");
+    if (argc >= 2 && std::string(argv[1]) == "--iio-scan")
+        return scan_live(iridi::SdrKind::IIO, argc >= 4 ? atof(argv[3]) : 10.0,
+                         argc >= 5 ? atof(argv[4]) : 2500000.0, argc >= 3 ? argv[2] : "ip:192.168.2.1");
     if (argc >= 2 && std::string(argv[1]) == "--rtl-list") return rtl_list_devices();
     if (argc >= 2 && std::string(argv[1]) == "--sdr-scan")
         return scan_live(iridi::SdrKind::Sdrplay, argc >= 3 ? atof(argv[2]) : 10.0,
@@ -2852,7 +2961,7 @@ int main(int argc, char **argv) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    g_window = glfwCreateWindow(1600, 900, "IridiScope", nullptr, nullptr);
+    g_window = glfwCreateWindow(1600, 900, "IridiScope - Native IIO", nullptr, nullptr);
     if (!g_window) { fprintf(stderr, "Failed to create GLFW window\n"); glfwTerminate(); return 1; }
     glfwMakeContextCurrent(g_window);
     glfwSwapInterval(1);
@@ -3017,6 +3126,9 @@ int main(int argc, char **argv) {
     if (g_sdr_scan_thread.joinable()) g_sdr_scan_thread.join();
     if (g_hrf_scan_thread.joinable()) g_hrf_scan_thread.join();
     if (g_ap_scan_thread.joinable()) g_ap_scan_thread.join();
+    g_rtlsdr.close(); g_iio.close();
+    if (g_rtl_scan_thread.joinable()) g_rtl_scan_thread.join();
+    if (g_iio_scan_thread.joinable()) g_iio_scan_thread.join();
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImPlot::DestroyContext();

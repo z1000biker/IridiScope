@@ -1,0 +1,67 @@
+name: Native IIO checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: analogdevicesinc/libiio
+          ref: a0eca0d2bf10326506fb762f0eec14255b27bef5
+          path: build-deps/libiio
+      - name: Configure and test real backend with fake IIO transport
+        run: |
+          cmake -S tests -B build-tests -DLIBIIO_INCLUDE_DIR="$PWD/build-deps/libiio"
+          cmake --build build-tests --parallel 2
+          ctest --test-dir build-tests --output-on-failure
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git make tar mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-libxml2 mingw-w64-x86_64-zstd
+      - name: Build pinned libiio and native Windows application
+        shell: msys2 {0}
+        run: |
+          set -e
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build_iio.ps1
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -RequireIio -IioRoot "$(cygpath -w "$PWD/build-deps/iio")"
+          cp build-deps/iio/bin/libiio.dll build/
+          cmake -S tests -B build-tests -G Ninja -DLIBIIO_INCLUDE_DIR="$PWD/build-deps/iio/include"
+          cmake --build build-tests --parallel 2
+          ctest --test-dir build-tests --output-on-failure
+      - name: Start executable without hardware
+        shell: msys2 {0}
+        run: |
+          set +e
+          build/IridiScope.exe --iio-list > build/iio-list.txt 2>&1
+          code=$?
+          cat build/iio-list.txt
+          # No attached radio returns 1. A disabled backend, DLL load error or
+          # application crash must not pass this smoke test.
+          test "$code" = 1 && grep -q 'iio_devices=0' build/iio-list.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: IridiScope-native-IIO-windows-x64
+          path: |
+            build/*.exe
+            build/*.dll
+            build/assets/
+            build/iio-list.txt
+            README.md
+            LICENSE
+            docs/

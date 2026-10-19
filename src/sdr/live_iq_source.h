@@ -73,6 +73,10 @@ public:
     std::vector<SdrDeviceInfo> list_devices() const;
     std::string device_name() const;
     bool available() const { return ensure_backend(); }
+    void set_uri(const std::string &uri);
+    void set_bandwidth(double hz);
+    void set_rf_port(const std::string &port);
+    std::string last_error() const;
 
 private:
     // Creates the backend on first use (needed to list devices before opening).
