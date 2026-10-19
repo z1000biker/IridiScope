@@ -33,7 +33,8 @@ def main():
     for root in roots:
         for path in root.glob('*.dll'):
             available.setdefault(path.name.lower(), path)
-    shutil.copy2(a.exe, a.output / a.exe.name)
+    if a.exe.resolve() != (a.output / a.exe.name).resolve():
+        shutil.copy2(a.exe, a.output / a.exe.name)
     pending = [a.output / a.exe.name]
     visited, manifest = set(), {}
     exports = {}
