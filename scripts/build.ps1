@@ -6,18 +6,19 @@ param(
     [string]$BuildType = "RelWithDebInfo",
     [switch]$Clean,
     [switch]$RequireIio,
-    [string]$IioRoot = ""
+    [string]$IioRoot = "",
+    [string]$Mingw = "C:\msys64\mingw64"
 )
 
 $ErrorActionPreference = "Stop"
 $root  = Split-Path -Parent $PSScriptRoot
-$mingw = "C:\msys64\mingw64\bin"
+$mingwBin = Join-Path $Mingw "bin"
 
-if (-not (Test-Path (Join-Path $mingw "g++.exe"))) {
-    throw "MSYS2 mingw64 toolchain not found at $mingw. Install MSYS2 + mingw-w64-x86_64-toolchain."
+if (-not (Test-Path (Join-Path $mingwBin "g++.exe"))) {
+    throw "MSYS2 mingw64 toolchain not found at $mingwBin. Install MSYS2 + mingw-w64-x86_64-toolchain."
 }
 
-$env:PATH = "$mingw;" + $env:PATH
+$env:PATH = "$mingwBin;" + $env:PATH
 $build = Join-Path $root "build"
 
 if ($Clean) {

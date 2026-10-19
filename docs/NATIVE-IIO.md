@@ -64,7 +64,8 @@ IQ files or use the other built-in sources.
 
 ## Build on Windows x64
 
-Use MSYS2 **MINGW64** (not a mixture of UCRT64 and MINGW64 libraries). Install
+Use one matching MSYS2 prefix throughout. Current CI uses **UCRT64**; the
+portable cross-build uses MINGW64 libraries. Do not mix their DLLs. Install
 its toolchain, CMake, Ninja, pkgconf, libusb, libxml2 and zstd packages as listed
 at the top of `scripts/build_iio.ps1`, plus MSYS2 `git`, `make` and `tar`.
 From PowerShell at the repository root:
@@ -90,6 +91,10 @@ The x64 build includes native IIO, HackRF, Airspy and RTL-SDR support.
 SDRplay requires its separately installed vendor API and was not included in
 this portable build. Optional libacars ARINC-622 detail decoding was not built;
 IridiScope's existing native message decoders remain available.
+
+For UCRT64, install the corresponding `mingw-w64-ucrt-x86_64-*` packages and
+pass `-Mingw C:\msys64\ucrt64` to all three PowerShell scripts. `bootstrap.ps1`
+also accepts `-MsysBash` when MSYS2 is installed outside `C:\msys64`.
 
 ## Tests
 

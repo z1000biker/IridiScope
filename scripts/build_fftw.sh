@@ -13,7 +13,7 @@ if [ -f "$INST/lib/libfftw3f.a" ]; then
     exit 0
 fi
 
-export PATH="/mingw64/bin:$PATH"
+export PATH="${MINGW_PREFIX:-/mingw64}/bin:$PATH"
 
 # Always build from a pristine tree.
 rm -rf "$SRC"

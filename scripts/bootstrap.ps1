@@ -3,11 +3,14 @@
 # miniaudio are vendored as source and built by CMake automatically.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
+param(
+    [string]$Mingw = "C:\msys64\mingw64",
+    [string]$MsysBash = "C:\msys64\usr\bin\bash.exe"
+)
 $ErrorActionPreference = "Stop"
 
 $root     = Split-Path -Parent $PSScriptRoot
-$mingw    = "C:\msys64\mingw64\bin"
-$msysBash = "C:\msys64\usr\bin\bash.exe"
+$mingwBin = Join-Path $Mingw "bin"
 
 function To-MsysPath([string]$p) {
     $full = (Get-Item $p).FullName
@@ -17,13 +20,13 @@ function To-MsysPath([string]$p) {
 Write-Host "IridiScope bootstrap"
 Write-Host "  repo root : $root"
 
-if (-not (Test-Path (Join-Path $mingw "g++.exe"))) {
-    throw "MSYS2 mingw64 toolchain not found at $mingw (install mingw-w64-x86_64-toolchain)."
+if (-not (Test-Path (Join-Path $mingwBin "g++.exe"))) {
+    throw "MSYS2 mingw64 toolchain not found at $mingwBin (install mingw-w64-x86_64-toolchain)."
 }
 if (-not (Test-Path $msysBash)) {
     throw "MSYS2 bash not found at $msysBash."
 }
-Write-Host "  toolchain : $mingw  [ok]"
+Write-Host "  toolchain : $mingwBin  [ok]"
 
 # ---- Vendored FFTW (autotools) --------------------------------------------
 $fftwLib = Join-Path $root "third_party\fftw\install\lib\libfftw3f.a"
